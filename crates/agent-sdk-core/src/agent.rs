@@ -10,7 +10,9 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::hook::Hook;
 use crate::loop_::{run_loop, LoopConfig};
+use crate::permission::{AskUserCallback, PermissionPolicy};
 use crate::stop::ArcStopCondition;
 use crate::{
     AgentBuilder, AgentError, AgentEvent, AgentEventStream, RunOutput, Session, Tool,
@@ -33,6 +35,9 @@ pub struct Agent {
     pub(crate) parallel_tool_calls: bool,
     pub(crate) stop_when: ArcStopCondition,
     pub(crate) default_session: Option<Session>,
+    pub(crate) hooks: Vec<Arc<dyn Hook>>,
+    pub(crate) permission: Arc<dyn PermissionPolicy>,
+    pub(crate) ask_user: Option<AskUserCallback>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -124,7 +129,7 @@ impl Agent {
         if !input.is_empty() {
             session.push(Message::new(
                 agent_sdk_language_model::Role::User,
-                vec![ContentBlock::text(input)],
+                vec![ContentBlock::text(input.clone())],
             ));
         }
 
@@ -144,6 +149,10 @@ impl Agent {
             stop_when: self.stop_when.clone(),
             session,
             cancel,
+            hooks: self.hooks.clone(),
+            permission: self.permission.clone(),
+            ask_user: self.ask_user.clone(),
+            initial_input: input,
         };
 
         tokio::spawn(async move {

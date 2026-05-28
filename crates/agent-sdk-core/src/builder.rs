@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use agent_sdk_language_model::{LanguageModel, ToolChoice, ToolSpec};
 
+use crate::hook::Hook;
+use crate::permission::{AllowAll, AskUserCallback, PermissionPolicy};
 use crate::stop::{ArcStopCondition, Never, StopCondition};
 use crate::{Agent, AgentError, Session, Tool};
 
@@ -25,6 +27,9 @@ pub struct AgentBuilder {
     parallel_tool_calls: bool,
     stop_when: ArcStopCondition,
     session: Option<Session>,
+    hooks: Vec<Arc<dyn Hook>>,
+    permission: Option<Arc<dyn PermissionPolicy>>,
+    ask_user: Option<AskUserCallback>,
 }
 
 impl Default for AgentBuilder {
@@ -48,6 +53,9 @@ impl AgentBuilder {
             parallel_tool_calls: true,
             stop_when: Arc::new(Never),
             session: None,
+            hooks: Vec::new(),
+            permission: None,
+            ask_user: None,
         }
     }
 
@@ -136,6 +144,50 @@ impl AgentBuilder {
         self
     }
 
+    /// Append a [`Hook`] to the lifecycle pipeline. Hooks fire in registration
+    /// order at every event; the first hook to return `Deny`/`Halt` short-
+    /// circuits the rest at that event.
+    pub fn hook<H: Hook + 'static>(mut self, hook: H) -> Self {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Append a pre-shared hook.
+    pub fn hook_arc(mut self, hook: Arc<dyn Hook>) -> Self {
+        self.hooks.push(hook);
+        self
+    }
+
+    /// Replace the entire hooks list.
+    pub fn hooks<I>(mut self, hooks: I) -> Self
+    where
+        I: IntoIterator<Item = Arc<dyn Hook>>,
+    {
+        self.hooks = hooks.into_iter().collect();
+        self
+    }
+
+    /// Install a [`PermissionPolicy`] consulted at `PreToolUse`. If omitted,
+    /// the loop uses [`AllowAll`].
+    pub fn permission<P: PermissionPolicy + 'static>(mut self, policy: P) -> Self {
+        self.permission = Some(Arc::new(policy));
+        self
+    }
+
+    /// Install a pre-shared permission policy.
+    pub fn permission_arc(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
+        self.permission = Some(policy);
+        self
+    }
+
+    /// Install the resolver invoked when the permission policy returns
+    /// [`Decision::AskUser`](crate::Decision::AskUser). If omitted, `AskUser`
+    /// degrades to `Deny`.
+    pub fn permission_ask(mut self, cb: AskUserCallback) -> Self {
+        self.ask_user = Some(cb);
+        self
+    }
+
     /// Validate and produce an [`Agent`].
     pub fn build(self) -> Result<Agent, AgentError> {
         let Some(model) = self.model else {
@@ -166,6 +218,9 @@ impl AgentBuilder {
             tools_map.insert(name, tool);
         }
 
+        let permission: Arc<dyn PermissionPolicy> =
+            self.permission.unwrap_or_else(|| Arc::new(AllowAll));
+
         Ok(Agent {
             model,
             tools: tools_map,
@@ -178,6 +233,9 @@ impl AgentBuilder {
             parallel_tool_calls: self.parallel_tool_calls,
             stop_when: self.stop_when,
             default_session: self.session,
+            hooks: self.hooks,
+            permission,
+            ask_user: self.ask_user,
         })
     }
 }

@@ -52,7 +52,9 @@ mod agent;
 mod builder;
 mod error;
 mod event;
+pub mod hook;
 mod loop_;
+pub mod permission;
 mod session;
 pub mod stop;
 mod tool;
@@ -61,6 +63,11 @@ pub use crate::agent::Agent;
 pub use crate::builder::AgentBuilder;
 pub use crate::error::AgentError;
 pub use crate::event::{AgentEvent, AgentEventStream, RunOutput};
+pub use crate::hook::{ExternalCommandHook, Hook, HookCtx, HookEvent, HookOutcome};
+pub use crate::permission::{
+    channel_callback, AllowAll, AllowList, AskUserCallback, AskUserFuture, AskUserPrompt,
+    Decision, DenyAll, DenyList, PermissionPolicy,
+};
 pub use crate::session::{Session, SessionStore};
 pub use crate::stop::{
     no_tool_calls, stop_count_is, And, LoopState, Never, NoToolCalls, Or, StopCondition,

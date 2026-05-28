@@ -6,9 +6,10 @@
 //! pushes [`AgentEvent`]s onto an `mpsc` sender consumed by
 //! [`AgentEventStream`](crate::AgentEventStream).
 //!
-//! Hook and permission call sites are stubbed for Phase 5 — the loop runs
-//! every hook point as a no-op pass-through so wiring them later is purely
-//! additive.
+//! Hooks fire at every lifecycle transition (`PreModel`, `PostModel`,
+//! `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `OnError`, `OnFinish`),
+//! and the configured [`PermissionPolicy`] is consulted just before each tool
+//! executes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +24,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{add_usage, error_event};
+use crate::hook::{Hook, HookCtx, HookEvent, HookOutcome};
+use crate::permission::{AskUserCallback, Decision, PermissionPolicy};
 use crate::stop::{ArcStopCondition, LoopState, StopCondition};
 use crate::{AgentError, AgentEvent, Session, Tool, ToolResult};
 
@@ -40,6 +43,12 @@ pub(crate) struct LoopConfig {
     pub stop_when: ArcStopCondition,
     pub session: Session,
     pub cancel: CancellationToken,
+    pub hooks: Vec<Arc<dyn Hook>>,
+    pub permission: Arc<dyn PermissionPolicy>,
+    pub ask_user: Option<AskUserCallback>,
+    /// Original user input — passed verbatim to the `UserPromptSubmit` hook
+    /// before the first model turn.
+    pub initial_input: String,
 }
 
 /// Per-tool-use accumulator while a streamed turn is in flight.
@@ -63,9 +72,34 @@ pub(crate) async fn run_loop(
     tx: mpsc::Sender<AgentEvent>,
     finish: oneshot::Sender<Result<(), AgentError>>,
 ) {
+    // Snapshot what `drive` needs to fire OnError before the cfg moves in.
+    let hooks_for_err = cfg.hooks.clone();
+    let provider_id = cfg.model.provider_id().to_string();
+    let model_id = cfg.model.model_id().to_string();
+    let session_id = if cfg.session.id.is_empty() {
+        None
+    } else {
+        Some(cfg.session.id.clone())
+    };
+
     let final_result = match drive(cfg, &tx).await {
         Ok(()) => Ok(()),
         Err(err) => {
+            // OnError: notify every hook. Observers only — they cannot
+            // suppress the underlying error.
+            for hook in &hooks_for_err {
+                let _ = hook
+                    .on_event(HookCtx {
+                        turn: 0,
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        session_id: session_id.clone(),
+                        event: HookEvent::OnError {
+                            message: err.to_string(),
+                        },
+                    })
+                    .await;
+            }
             let _ = tx.send(error_event(&err)).await;
             Err(err)
         }
@@ -73,16 +107,86 @@ pub(crate) async fn run_loop(
     let _ = finish.send(final_result);
 }
 
+/// Result of pushing one [`HookEvent`] through the hook chain.
+enum HookFlow {
+    /// Pass through. `Some(req)` carries the (possibly modified) request for
+    /// `PreModel`; every other event uses `None`.
+    Continue(Option<LanguageModelRequest>),
+    /// A hook denied — surfaced to the model as a tool-result error at
+    /// `PreToolUse`; treated as `HookHalt` elsewhere.
+    Deny(String),
+    /// A hook explicitly halted the loop.
+    Halt(String),
+}
+
+/// Dispatch one event through every registered hook in order. Stops at the
+/// first hook that returns `Deny`/`Halt`. `ModifyRequest` is honoured for
+/// `PreModel` only; for every other event it is treated as `Continue`.
+async fn dispatch_hooks(cfg: &LoopConfig, turn: u32, event: HookEvent) -> HookFlow {
+    let session_id = if cfg.session.id.is_empty() {
+        None
+    } else {
+        Some(cfg.session.id.clone())
+    };
+    let is_pre_model = matches!(event, HookEvent::PreModel { .. });
+    // Seed the request carrier from the event itself so we always have a
+    // valid request to return for PreModel even when no hook modifies it.
+    let mut carried_request: Option<LanguageModelRequest> = match &event {
+        HookEvent::PreModel { request } => Some(request.clone()),
+        _ => None,
+    };
+
+    let mut event = event;
+    for hook in &cfg.hooks {
+        let ctx = HookCtx {
+            turn,
+            provider_id: cfg.model.provider_id().to_string(),
+            model_id: cfg.model.model_id().to_string(),
+            session_id: session_id.clone(),
+            event: event.clone(),
+        };
+        match hook.on_event(ctx).await {
+            HookOutcome::Continue => {}
+            HookOutcome::ModifyRequest(req) => {
+                if is_pre_model {
+                    carried_request = Some(*req.clone());
+                    // Update the event so subsequent hooks see the new request.
+                    event = HookEvent::PreModel { request: *req };
+                }
+            }
+            HookOutcome::Deny(reason) => return HookFlow::Deny(reason),
+            HookOutcome::Halt(reason) => return HookFlow::Halt(reason),
+        }
+    }
+    HookFlow::Continue(carried_request)
+}
+
 async fn drive(mut cfg: LoopConfig, tx: &mpsc::Sender<AgentEvent>) -> Result<(), AgentError> {
     let mut total_usage = Usage::default();
     let mut turn: u32 = 0;
+
+    // UserPromptSubmit fires once at the top of the run, before the first
+    // model call. Skip if there is no fresh input (e.g. seeded session).
+    if !cfg.initial_input.is_empty() {
+        let outcome = dispatch_hooks(
+            &cfg,
+            turn,
+            HookEvent::UserPromptSubmit {
+                input: cfg.initial_input.clone(),
+            },
+        )
+        .await;
+        match outcome {
+            HookFlow::Continue(_) => {}
+            HookFlow::Halt(reason) => return Err(AgentError::HookHalt(reason)),
+            HookFlow::Deny(reason) => return Err(AgentError::HookHalt(reason)),
+        }
+    }
 
     loop {
         if cfg.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
-
-        // Hooks: UserPromptSubmit (first turn) / PreModel — wired in Phase 5.
 
         let mut req = LanguageModelRequest::default();
         req.messages = cfg.session.messages.clone();
@@ -92,8 +196,15 @@ async fn drive(mut cfg: LoopConfig, tx: &mpsc::Sender<AgentEvent>) -> Result<(),
         req.temperature = cfg.temperature;
         req.max_tokens = cfg.max_tokens;
 
+        // PreModel: hooks may rewrite the request before it goes upstream.
+        req = match dispatch_hooks(&cfg, turn, HookEvent::PreModel { request: req }).await {
+            HookFlow::Continue(Some(replaced)) => replaced,
+            HookFlow::Continue(None) => unreachable!("PreModel must surface the request"),
+            HookFlow::Halt(reason) => return Err(AgentError::HookHalt(reason)),
+            HookFlow::Deny(reason) => return Err(AgentError::HookHalt(reason)),
+        };
+
         let turn_outcome = run_turn(&cfg, req, turn, tx).await?;
-        // Hooks: PostModel — wired in Phase 5.
 
         let TurnOutcome {
             assistant_message,
@@ -101,6 +212,23 @@ async fn drive(mut cfg: LoopConfig, tx: &mpsc::Sender<AgentEvent>) -> Result<(),
             usage,
             tool_uses,
         } = turn_outcome;
+
+        // PostModel: notify hooks of the assistant message + usage.
+        match dispatch_hooks(
+            &cfg,
+            turn,
+            HookEvent::PostModel {
+                message: assistant_message.clone(),
+                usage,
+            },
+        )
+        .await
+        {
+            HookFlow::Continue(_) => {}
+            HookFlow::Halt(reason) | HookFlow::Deny(reason) => {
+                return Err(AgentError::HookHalt(reason));
+            }
+        }
 
         total_usage = add_usage(total_usage, usage);
         cfg.session.push(assistant_message);
@@ -121,6 +249,18 @@ async fn drive(mut cfg: LoopConfig, tx: &mpsc::Sender<AgentEvent>) -> Result<(),
 
         // Natural termination: no tool calls => provider considered the turn final.
         if tool_uses.is_empty() {
+            // OnFinish: best-effort notify; ignore Deny/Halt — the loop is
+            // already finished, hooks here are observers.
+            let _ = dispatch_hooks(
+                &cfg,
+                turn,
+                HookEvent::OnFinish {
+                    turns: turn,
+                    reason: finish_reason,
+                    usage: total_usage,
+                },
+            )
+            .await;
             send_event(
                 tx,
                 AgentEvent::Finish {
@@ -144,6 +284,16 @@ async fn drive(mut cfg: LoopConfig, tx: &mpsc::Sender<AgentEvent>) -> Result<(),
             last_tool_call_count: tool_call_count,
         };
         if cfg.stop_when.should_stop(&state) {
+            let _ = dispatch_hooks(
+                &cfg,
+                turn,
+                HookEvent::OnFinish {
+                    turns: turn,
+                    reason: finish_reason,
+                    usage: total_usage,
+                },
+            )
+            .await;
             send_event(
                 tx,
                 AgentEvent::Finish {
@@ -171,6 +321,7 @@ struct TurnOutcome {
 }
 
 /// A fully-accumulated tool call from one turn.
+#[derive(Clone)]
 struct FinalToolUse {
     id: String,
     name: String,
@@ -346,23 +497,42 @@ async fn execute_tools(
         }
     }
 
-    let mut results: Vec<(usize, ContentBlock)> = Vec::with_capacity(tool_uses.len());
+    // Phase 1 (sequential): for each tool call, fire PreToolUse + permission.
+    // Calls that survive both gates queue for execution; calls that get
+    // denied/asked-and-denied resolve into a synthetic error ToolResult.
+    let mut gated: Vec<GatedToolUse> = Vec::with_capacity(tool_uses.len());
+    for tu in tool_uses {
+        match gate_tool_call(cfg, turn, tu).await? {
+            Some(result) => gated.push(GatedToolUse::PreResolved {
+                tu: tu.clone(),
+                result,
+            }),
+            None => gated.push(GatedToolUse::Ready(tu.clone())),
+        }
+    }
 
-    if cfg.parallel_tool_calls && tool_uses.len() > 1 {
-        let mut set: JoinSet<(usize, FinalToolUse, Result<ToolResult, AgentError>)> = JoinSet::new();
-        for (idx, tu) in tool_uses.iter().enumerate() {
-            // Pre-flight above guarantees presence.
+    // Phase 2 (parallel or sequential): execute the surviving calls.
+    let mut indexed: Vec<(usize, FinalToolUse, ToolResult)> = Vec::with_capacity(gated.len());
+
+    // First, harvest pre-resolved (denied) calls — no execution needed.
+    let mut to_execute: Vec<(usize, FinalToolUse)> = Vec::new();
+    for (idx, item) in gated.into_iter().enumerate() {
+        match item {
+            GatedToolUse::PreResolved { tu, result } => indexed.push((idx, tu, result)),
+            GatedToolUse::Ready(tu) => to_execute.push((idx, tu)),
+        }
+    }
+
+    if cfg.parallel_tool_calls && to_execute.len() > 1 {
+        let mut set: JoinSet<(usize, FinalToolUse, Result<ToolResult, AgentError>)> =
+            JoinSet::new();
+        for (idx, tu) in to_execute {
             let tool = cfg.tools.get(&tu.name).expect("validated above").clone();
             let args = tu.arguments.clone();
             let cancel = cfg.cancel.clone();
-            let owned = FinalToolUse {
-                id: tu.id.clone(),
-                name: tu.name.clone(),
-                arguments: tu.arguments.clone(),
-            };
             set.spawn(async move {
                 let res = tool.execute(args, cancel).await;
-                (idx, owned, res)
+                (idx, tu, res)
             });
         }
 
@@ -377,32 +547,7 @@ async fn execute_tools(
             };
             let Some(join_res) = next else { break };
             match join_res {
-                Ok((idx, tu, Ok(result))) => {
-                    if send_event(
-                        tx,
-                        AgentEvent::ToolResult {
-                            turn,
-                            id: tu.id.clone(),
-                            name: tu.name.clone(),
-                            content: result.content.clone(),
-                            is_error: result.is_error,
-                        },
-                    )
-                    .await
-                    .is_err()
-                    {
-                        set.abort_all();
-                        return Err(AgentError::Cancelled);
-                    }
-                    results.push((
-                        idx,
-                        ContentBlock::ToolResult {
-                            tool_use_id: tu.id,
-                            content: result.content,
-                            is_error: if result.is_error { Some(true) } else { None },
-                        },
-                    ));
-                }
+                Ok((idx, tu, Ok(result))) => indexed.push((idx, tu, result)),
                 Ok((_, tu, Err(err))) => {
                     set.abort_all();
                     return Err(map_tool_err(tu.name, err));
@@ -416,10 +561,8 @@ async fn execute_tools(
                 }
             }
         }
-
-        results.sort_by_key(|(idx, _)| *idx);
     } else {
-        for (idx, tu) in tool_uses.iter().enumerate() {
+        for (idx, tu) in to_execute {
             let tool = cfg.tools.get(&tu.name).expect("validated above").clone();
             let result = tokio::select! {
                 biased;
@@ -430,29 +573,124 @@ async fn execute_tools(
                 Ok(r) => r,
                 Err(err) => return Err(map_tool_err(tu.name.clone(), err)),
             };
-            send_event(
-                tx,
-                AgentEvent::ToolResult {
-                    turn,
-                    id: tu.id.clone(),
-                    name: tu.name.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                },
-            )
-            .await?;
-            results.push((
-                idx,
-                ContentBlock::ToolResult {
-                    tool_use_id: tu.id.clone(),
-                    content: result.content,
-                    is_error: if result.is_error { Some(true) } else { None },
-                },
-            ));
+            indexed.push((idx, tu, result));
         }
     }
 
+    // Phase 3: emit ToolResult events + run PostToolUse hooks in original
+    // call order so observers see a stable sequence.
+    indexed.sort_by_key(|(idx, _, _)| *idx);
+
+    let mut results: Vec<(usize, ContentBlock)> = Vec::with_capacity(indexed.len());
+    for (idx, tu, result) in indexed {
+        send_event(
+            tx,
+            AgentEvent::ToolResult {
+                turn,
+                id: tu.id.clone(),
+                name: tu.name.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+            },
+        )
+        .await?;
+
+        // PostToolUse: observers only. Hook Halt still ends the loop.
+        match dispatch_hooks(
+            cfg,
+            turn,
+            HookEvent::PostToolUse {
+                tool_use_id: tu.id.clone(),
+                name: tu.name.clone(),
+                result: result.clone(),
+            },
+        )
+        .await
+        {
+            HookFlow::Continue(_) | HookFlow::Deny(_) => {}
+            HookFlow::Halt(reason) => return Err(AgentError::HookHalt(reason)),
+        }
+
+        results.push((
+            idx,
+            ContentBlock::ToolResult {
+                tool_use_id: tu.id,
+                content: result.content,
+                is_error: if result.is_error { Some(true) } else { None },
+            },
+        ));
+    }
+
     Ok(results.into_iter().map(|(_, c)| c).collect())
+}
+
+/// Phase-2 outcome for a tool call after passing through the PreToolUse +
+/// permission gates.
+enum GatedToolUse {
+    /// Hook or policy denied — a synthetic error result is already pinned.
+    PreResolved { tu: FinalToolUse, result: ToolResult },
+    /// Cleared to execute.
+    Ready(FinalToolUse),
+}
+
+/// Run PreToolUse hooks + permission policy for a single call.
+///
+/// Returns:
+/// - `Ok(Some(result))` — call was denied, synthetic error to send to model.
+/// - `Ok(None)` — call passes, execute the tool.
+/// - `Err(_)` — halt the loop (HookHalt, Cancelled).
+async fn gate_tool_call(
+    cfg: &LoopConfig,
+    turn: u32,
+    tu: &FinalToolUse,
+) -> Result<Option<ToolResult>, AgentError> {
+    // PreToolUse hooks first.
+    match dispatch_hooks(
+        cfg,
+        turn,
+        HookEvent::PreToolUse {
+            tool_use_id: tu.id.clone(),
+            name: tu.name.clone(),
+            arguments: tu.arguments.clone(),
+        },
+    )
+    .await
+    {
+        HookFlow::Continue(_) => {}
+        HookFlow::Deny(reason) => {
+            return Ok(Some(ToolResult::error(format!(
+                "hook denied tool '{}': {reason}",
+                tu.name
+            ))));
+        }
+        HookFlow::Halt(reason) => return Err(AgentError::HookHalt(reason)),
+    }
+
+    // Permission policy.
+    let decision = cfg.permission.check(&tu.name, &tu.arguments).await;
+    let decision = match decision {
+        Decision::AskUser { prompt } => match &cfg.ask_user {
+            Some(cb) => cb(prompt).await,
+            None => Decision::Deny(format!(
+                "permission policy asked the user for '{}' but no AskUser callback is configured",
+                tu.name
+            )),
+        },
+        other => other,
+    };
+
+    match decision {
+        Decision::Allow => Ok(None),
+        Decision::Deny(reason) => Ok(Some(ToolResult::error(format!(
+            "permission denied for '{}': {reason}",
+            tu.name
+        )))),
+        // AskUser already resolved above; treat any residual as deny.
+        Decision::AskUser { prompt } => Ok(Some(ToolResult::error(format!(
+            "permission policy left AskUser unresolved for '{}': {prompt}",
+            tu.name
+        )))),
+    }
 }
 
 /// Send an event to the caller. If the receiver has been dropped (the caller
