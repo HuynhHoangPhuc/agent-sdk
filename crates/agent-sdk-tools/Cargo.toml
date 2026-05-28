@@ -6,7 +6,24 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Built-in coding toolkit (Bash/Read/Write/Edit/Grep/Glob/Ls) for agent-sdk. (stub — Phase 6.)"
+description = "Built-in coding toolkit (Bash/Read/Write/Edit/Grep/Glob/Ls) for agent-sdk."
 
 [dependencies]
-agent-sdk-language-model = { path = "../agent-sdk-language-model", version = "0.1.0" }
+agent-sdk-core = { path = "../agent-sdk-core", version = "0.1.0" }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "process", "fs", "io-util", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+regex = "1"
+ignore = "0.4"
+globset = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "process", "fs", "io-util"] }
