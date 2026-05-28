@@ -36,6 +36,15 @@ pub struct Message {
 }
 
 impl Message {
+    /// Construct a message with an explicit role and content block list.
+    ///
+    /// Use this in cross-crate code because [`Message`] is `#[non_exhaustive]`
+    /// — struct literals are forbidden outside this crate, but `Message::new`
+    /// works everywhere.
+    pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self { role, content }
+    }
+
     /// Construct a plain-text user message.
     pub fn user(text: impl Into<String>) -> Self {
         Self {
