@@ -31,7 +31,10 @@ const MAX_CONSECUTIVE_PARSE_ERRORS: u32 = 8;
 /// Most callers should use [`Anthropic::new`] or the `claude_sonnet_4_6`
 /// constructor. This struct exists for tests (custom `base_url` against
 /// wiremock) and for users who want a tuned `reqwest::Client`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually to redact `api_key` — never include the
+/// raw key in logs.
+#[derive(Clone)]
 pub struct AnthropicConfig {
     /// Anthropic API key (`x-api-key` header).
     pub api_key: String,
@@ -39,6 +42,16 @@ pub struct AnthropicConfig {
     pub base_url: String,
     /// Connect/request timeout. `None` disables.
     pub timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for AnthropicConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicConfig")
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl AnthropicConfig {
@@ -60,6 +73,7 @@ impl AnthropicConfig {
 }
 
 /// Anthropic Messages-API-backed [`LanguageModel`] implementation.
+#[derive(Debug, Clone)]
 pub struct Anthropic {
     model_id: String,
     config: AnthropicConfig,
@@ -70,22 +84,37 @@ impl Anthropic {
     /// Construct a model targeting `model_id` (e.g. `"claude-sonnet-4-6"`,
     /// `"claude-opus-4-7"`) with the supplied API key. Uses Anthropic's
     /// public base URL.
-    pub fn new(model_id: impl Into<String>, api_key: impl Into<String>) -> Self {
+    ///
+    /// Returns [`ModelError::Other`] only if the underlying `reqwest` client
+    /// fails to initialize (e.g. TLS backend misconfiguration). With the
+    /// crate's default `rustls + webpki-roots` stack this is effectively
+    /// infallible.
+    pub fn new(
+        model_id: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Result<Self, ModelError> {
         Self::with_config(model_id, AnthropicConfig::new(api_key))
     }
 
     /// Construct from an explicit [`AnthropicConfig`].
-    pub fn with_config(model_id: impl Into<String>, config: AnthropicConfig) -> Self {
+    ///
+    /// See [`Anthropic::new`] for the failure modes.
+    pub fn with_config(
+        model_id: impl Into<String>,
+        config: AnthropicConfig,
+    ) -> Result<Self, ModelError> {
         let mut builder = reqwest::Client::builder();
         if let Some(t) = config.timeout {
             builder = builder.timeout(t);
         }
-        let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
-        Self {
+        let http = builder
+            .build()
+            .map_err(|e| ModelError::Other(format!("reqwest client build: {e}")))?;
+        Ok(Self {
             model_id: model_id.into(),
             config,
             http,
-        }
+        })
     }
 
     fn headers(&self) -> Result<HeaderMap, ModelError> {
@@ -150,7 +179,7 @@ impl LanguageModel for Anthropic {
         }
 
         let bytes_stream = resp.bytes_stream();
-        let cancel_fut = Box::pin(cancel.clone().cancelled_owned());
+        let cancel_fut = Box::pin(cancel.cancelled_owned());
         Ok(Box::pin(EventStream {
             inner: bytes_stream,
             parser: SseParser::new(),
@@ -159,7 +188,6 @@ impl LanguageModel for Anthropic {
             done: false,
             consecutive_parse_errors: 0,
             cancel_fut,
-            _cancel: cancel,
         }))
     }
 }
@@ -209,7 +237,9 @@ pin_project_lite::pin_project! {
     ///
     /// Cancellation is polled alongside the byte stream so a mid-body cancel
     /// drops the connection at the next poll wake-up instead of waiting for
-    /// the next chunk to arrive.
+    /// the next chunk to arrive. Cancel is also polled *before* draining the
+    /// buffered event queue, so a cancel preempts emission of already-parsed
+    /// events rather than waiting for the buffer to empty.
     struct EventStream<S> {
         #[pin]
         inner: S,
@@ -221,9 +251,6 @@ pin_project_lite::pin_project! {
         // Pinned cancellation future — its waker is registered on every poll
         // so cancel() wakes us even while `inner.poll_next` is parked.
         cancel_fut: Pin<Box<WaitForCancellationFutureOwned>>,
-        // Owned clone kept alive for callers that may still hold the token;
-        // also lets us inspect cancellation state without a stale waker.
-        _cancel: CancellationToken,
     }
 }
 
@@ -239,6 +266,14 @@ where
             if *this.done {
                 return Poll::Ready(None);
             }
+            // Poll cancel first so its waker is registered AND cancel preempts
+            // emission. If a chunk produced 50 buffered events and cancel
+            // arrives after the first, the remaining 49 are dropped rather
+            // than delivered before the consumer learns about cancel.
+            if this.cancel_fut.as_mut().poll(cx).is_ready() {
+                *this.done = true;
+                return Poll::Ready(Some(Err(ModelError::Cancelled)));
+            }
             if let Some(ev) = this.buffered.pop_front() {
                 // Spec contract: no events follow `Error`. End the stream
                 // immediately after surfacing one.
@@ -246,13 +281,6 @@ where
                     *this.done = true;
                 }
                 return Poll::Ready(Some(Ok(ev)));
-            }
-            // Poll cancel first so its waker is registered — if the token
-            // is cancelled mid-poll, cx will be woken even while `inner` is
-            // parked on the network.
-            if this.cancel_fut.as_mut().poll(cx).is_ready() {
-                *this.done = true;
-                return Poll::Ready(Some(Err(ModelError::Cancelled)));
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -311,15 +339,23 @@ mod tests {
     #[test]
     fn endpoint_strips_trailing_slash() {
         let cfg = AnthropicConfig::new("k").with_base_url("http://x/");
-        let a = Anthropic::with_config("m", cfg);
+        let a = Anthropic::with_config("m", cfg).expect("build");
         assert_eq!(a.endpoint(), "http://x/v1/messages");
     }
 
     #[test]
     fn provider_and_model_ids() {
-        let a = Anthropic::new("claude-sonnet-4-6", "k");
+        let a = Anthropic::new("claude-sonnet-4-6", "k").expect("build");
         assert_eq!(a.provider_id(), "anthropic");
         assert_eq!(a.model_id(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let cfg = AnthropicConfig::new("sk-super-secret-key");
+        let s = format!("{cfg:?}");
+        assert!(!s.contains("sk-super-secret-key"), "key leaked: {s}");
+        assert!(s.contains("<redacted>"));
     }
 
     #[tokio::test]
@@ -327,7 +363,8 @@ mod tests {
         let a = Anthropic::with_config(
             "m",
             AnthropicConfig::new("k").with_base_url("http://127.0.0.1:1"),
-        );
+        )
+        .expect("build");
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut req = LanguageModelRequest::default();

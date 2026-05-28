@@ -106,6 +106,12 @@ pub enum ContentBlock {
         /// The reasoning text. Encrypted/redacted blocks are passed through
         /// verbatim by providers that need to round-trip them.
         text: String,
+        /// Opaque signature/proof the provider requires to be echoed back
+        /// verbatim on the next turn (e.g. Anthropic extended-thinking
+        /// signature). Providers that don't need round-trip verification
+        /// leave this `None`.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        signature: Option<String>,
     },
 }
 

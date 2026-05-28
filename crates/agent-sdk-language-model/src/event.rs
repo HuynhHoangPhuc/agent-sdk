@@ -59,6 +59,17 @@ pub enum LanguageModelEvent {
         delta: String,
     },
 
+    /// Opaque signature/proof for the current reasoning block. Providers that
+    /// require the signature to be echoed back on the next turn (Anthropic
+    /// extended thinking) emit one of these per reasoning block, typically
+    /// just before the block closes. Consumers reassembling
+    /// [`ContentBlock::Reasoning`](crate::ContentBlock::Reasoning) must thread
+    /// the signature into the block's `signature` field.
+    ReasoningSignature {
+        /// Opaque provider-issued signature string.
+        signature: String,
+    },
+
     /// The model has begun invoking a tool. `input` is empty here; argument
     /// JSON arrives as one or more [`Self::ToolCallDelta`] events and is
     /// finalized by [`Self::ToolCallEnd`].

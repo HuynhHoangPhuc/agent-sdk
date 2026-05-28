@@ -55,6 +55,8 @@ pub(crate) enum WireContent {
     },
     Thinking {
         thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
 }
 
@@ -146,6 +148,9 @@ pub(crate) enum StreamDelta {
     },
     ThinkingDelta {
         thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
     },
     #[serde(other)]
     Other,

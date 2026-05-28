@@ -28,8 +28,10 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// internal harness defaults to. Other model ids can be passed directly:
 ///
 /// ```ignore
-/// let m = agent_sdk_anthropic::Anthropic::new("claude-opus-4-7", env_api_key);
+/// let m = agent_sdk_anthropic::Anthropic::new("claude-opus-4-7", env_api_key)?;
 /// ```
-pub fn claude_sonnet_4_6(api_key: impl Into<String>) -> Anthropic {
+pub fn claude_sonnet_4_6(
+    api_key: impl Into<String>,
+) -> Result<Anthropic, agent_sdk_language_model::ModelError> {
     Anthropic::new("claude-sonnet-4-6", api_key)
 }

@@ -153,6 +153,11 @@ mod tests {
     fn content_block_reasoning_roundtrip() {
         assert_roundtrip(&ContentBlock::Reasoning {
             text: "step 1".into(),
+            signature: None,
+        });
+        assert_roundtrip(&ContentBlock::Reasoning {
+            text: "step 1".into(),
+            signature: Some("sig_abc".into()),
         });
     }
 
@@ -195,6 +200,13 @@ mod tests {
     fn event_reasoning_delta_roundtrip() {
         assert_roundtrip(&LanguageModelEvent::ReasoningDelta {
             delta: "step 1".into(),
+        });
+    }
+
+    #[test]
+    fn event_reasoning_signature_roundtrip() {
+        assert_roundtrip(&LanguageModelEvent::ReasoningSignature {
+            signature: "sig_abc".into(),
         });
     }
 

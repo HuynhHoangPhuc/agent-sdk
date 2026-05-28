@@ -87,6 +87,9 @@ impl EventMapper {
                     (Some(BlockKind::Thinking), StreamDelta::ThinkingDelta { thinking }) => {
                         vec![LanguageModelEvent::ReasoningDelta { delta: thinking }]
                     }
+                    (Some(BlockKind::Thinking), StreamDelta::SignatureDelta { signature }) => {
+                        vec![LanguageModelEvent::ReasoningSignature { signature }]
+                    }
                     _ => Vec::new(),
                 }
             }

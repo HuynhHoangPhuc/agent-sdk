@@ -41,7 +41,7 @@ async fn mount_sse(server: &MockServer, body: String) {
 
 fn provider(server: &MockServer) -> Anthropic {
     let cfg = AnthropicConfig::new("test-key").with_base_url(server.uri());
-    Anthropic::with_config("claude-sonnet-4-6", cfg)
+    Anthropic::with_config("claude-sonnet-4-6", cfg).expect("build provider")
 }
 
 async fn collect(model: &Anthropic, cancel: CancellationToken) -> Vec<LanguageModelEvent> {
@@ -148,8 +148,13 @@ async fn surfaces_reasoning_deltas() {
             _ => None,
         })
         .collect();
-    assert!(reasoning.contains("Considering"));
-    assert!(reasoning.contains("done thinking"));
+    assert_eq!(reasoning, "Considering the request... done thinking.");
+
+    let signature = events.iter().find_map(|e| match e {
+        LanguageModelEvent::ReasoningSignature { signature } => Some(signature.as_str()),
+        _ => None,
+    });
+    assert_eq!(signature, Some("sig_abc123"));
 
     let text: String = events
         .iter()
@@ -219,6 +224,32 @@ async fn cancel_mid_stream_stops_polling() {
         saw_cancelled,
         "cancel should surface as ModelError::Cancelled before stream ends"
     );
+}
+
+#[tokio::test]
+async fn cancel_before_send_never_hits_server() {
+    let server = MockServer::start().await;
+    // Mount a matcher that would respond if hit. We assert below that it was
+    // never invoked — proves cancel-before-send drops the request entirely.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let p = provider(&server);
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let res = p.stream(req(), cancel).await;
+    assert!(
+        matches!(res, Err(agent_sdk_language_model::ModelError::Cancelled)),
+        "expected Cancelled"
+    );
+    // MockServer::drop verifies `.expect(0)` — i.e. no request reached the
+    // server. Explicit assertion via `received_requests` for clarity.
+    let recvd = server.received_requests().await.unwrap_or_default();
+    assert!(recvd.is_empty(), "expected no HTTP requests, got {recvd:?}");
 }
 
 #[tokio::test]

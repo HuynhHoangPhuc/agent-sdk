@@ -26,7 +26,7 @@ pub(crate) fn build_request(
 ) -> Result<MessagesRequest, ModelError> {
     let system = build_system(req);
     let tools = req.tools.iter().map(map_tool).collect::<Vec<_>>();
-    let tool_choice = map_tool_choice(&req.tool_choice);
+    let tool_choice = map_tool_choice(&req.tool_choice)?;
     let messages = map_messages(req)?;
 
     Ok(MessagesRequest {
@@ -74,14 +74,20 @@ fn map_tool(spec: &agent_sdk_language_model::ToolSpec) -> WireTool {
     }
 }
 
-fn map_tool_choice(choice: &ToolChoice) -> Option<Value> {
-    match choice {
+fn map_tool_choice(choice: &ToolChoice) -> Result<Option<Value>, ModelError> {
+    Ok(match choice {
         ToolChoice::Auto => None, // Anthropic default
         ToolChoice::Required => Some(json!({"type": "any"})),
         ToolChoice::Tool { name } => Some(json!({"type": "tool", "name": name})),
         ToolChoice::None => Some(json!({"type": "none"})),
-        _ => None,
-    }
+        // ToolChoice is non_exhaustive — refuse to translate unknown variants
+        // rather than silently misrouting via a default.
+        _ => {
+            return Err(ModelError::InvalidRequest(
+                "unsupported ToolChoice variant for Anthropic provider".into(),
+            ))
+        }
+    })
 }
 
 fn map_messages(req: &LanguageModelRequest) -> Result<Vec<WireMessage>, ModelError> {
@@ -146,8 +152,11 @@ fn wire_role(msg: &Message) -> Result<&'static str, ModelError> {
         Role::System => Err(ModelError::InvalidRequest(
             "system role messages must be hoisted before reaching map_messages".into(),
         )),
-        // Spec's Role is non_exhaustive; treat any future variant as user-side.
-        _ => Ok("user"),
+        // Role is non_exhaustive — refuse unknown variants so a future addition
+        // can't silently masquerade as `user` on the wire.
+        _ => Err(ModelError::InvalidRequest(
+            "unsupported Role variant for Anthropic provider".into(),
+        )),
     }
 }
 
@@ -174,16 +183,17 @@ fn map_block(
             content: content.clone(),
             is_error: *is_error,
         },
-        ContentBlock::Reasoning { text } => WireContent::Thinking {
+        ContentBlock::Reasoning { text, signature } => WireContent::Thinking {
             thinking: text.clone(),
+            signature: signature.clone(),
         },
-        // ContentBlock is non_exhaustive; drop unknown variants by serializing
-        // their text representation, if any future variant adds one. For now,
-        // surface as empty text — providers can update when new variants land.
-        _ => WireContent::Text {
-            text: String::new(),
-            cache_control,
-        },
+        // ContentBlock is non_exhaustive — refuse unknown variants so callers
+        // see a clear error rather than a silently-empty wire block.
+        _ => {
+            return Err(ModelError::InvalidRequest(
+                "unsupported ContentBlock variant for Anthropic provider".into(),
+            ))
+        }
     })
 }
 
