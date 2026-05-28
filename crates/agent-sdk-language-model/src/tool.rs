@@ -17,6 +17,25 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
 }
 
+impl ToolSpec {
+    /// Construct a [`ToolSpec`] from name, description, and a JSON Schema.
+    ///
+    /// Use this in cross-crate code (provider crates, user code) because the
+    /// struct is `#[non_exhaustive]` — struct literals are forbidden outside
+    /// this crate, but `ToolSpec::new(..)` works everywhere.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
 /// How aggressively the model should select tools.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
