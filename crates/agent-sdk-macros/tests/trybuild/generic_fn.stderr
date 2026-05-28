@@ -1,0 +1,5 @@
+error: #[tool] does not support generic parameters
+ --> tests/trybuild/generic_fn.rs:5:17
+  |
+5 | async fn generic<T: ToString>(value: T) -> Result<ToolResult, AgentError> {
+  |                 ^

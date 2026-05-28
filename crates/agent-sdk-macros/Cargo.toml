@@ -6,9 +6,24 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Procedural macros (#[tool], etc.) for agent-sdk. (stub — Phase 4.)"
+description = "Procedural macros (#[tool], #[hook]) for agent-sdk."
 
 [lib]
 proc-macro = true
 
 [dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+
+[dev-dependencies]
+# Tests need the runtime types the macros generate calls against.
+agent-sdk-core = { path = "../agent-sdk-core", version = "0.1.0" }
+agent-sdk-language-model = { path = "../agent-sdk-language-model", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util = { workspace = true }
+trybuild = { workspace = true }

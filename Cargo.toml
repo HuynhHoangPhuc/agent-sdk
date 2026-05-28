@@ -38,6 +38,15 @@ tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "stream", "json"] }
 bytes = "1"
 
+# JSON Schema derivation (used by macros + re-exported from core for version coupling)
+schemars = "1"
+
+# Proc-macro infrastructure (agent-sdk-macros only)
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+trybuild = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
