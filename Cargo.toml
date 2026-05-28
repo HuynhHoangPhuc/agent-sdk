@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-sdk-language-model",
+    "crates/agent-sdk-core",
+    "crates/agent-sdk-anthropic",
+    "crates/agent-sdk-openai",
+    "crates/agent-sdk-gemini",
+    "crates/agent-sdk-openai-compat",
+    "crates/agent-sdk-tools",
+    "crates/agent-sdk-mcp",
+    "crates/agent-sdk-macros",
+    "crates/agent-sdk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/phuchoang-huynh/agent-sdk"
+homepage = "https://github.com/phuchoang-huynh/agent-sdk"
+authors = ["Huynh Hoang Phuc <phuchoang.huynh.207@gmail.com>"]
+
+[workspace.dependencies]
+# Spec-level (zero-runtime) deps used by agent-sdk-language-model
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+futures-core = "0.3"
+futures-util = "0.3"
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+thiserror = "1"
+
+# Runtime / shared infra (used by core + providers, NOT by spec crate)
+tokio = { version = "1", default-features = false }
+tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+bytes = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

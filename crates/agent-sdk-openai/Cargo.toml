@@ -1,0 +1,12 @@
+[package]
+name = "agent-sdk-openai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenAI Chat Completions / Responses provider for agent-sdk. (stub — Phase 7.)"
+
+[dependencies]
+agent-sdk-language-model = { path = "../agent-sdk-language-model", version = "0.1.0" }

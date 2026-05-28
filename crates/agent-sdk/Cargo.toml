@@ -1,0 +1,12 @@
+[package]
+name = "agent-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Build provider-agnostic AI agents in Rust. Facade crate with curated re-exports. (stub — Phase 12.)"
+
+[dependencies]
+agent-sdk-language-model = { path = "../agent-sdk-language-model", version = "0.1.0" }

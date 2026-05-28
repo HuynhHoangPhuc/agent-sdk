@@ -1,0 +1,23 @@
+[package]
+name = "agent-sdk-language-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Provider-agnostic LanguageModel trait + request/event spec for the agent-sdk ecosystem. Zero runtime dependencies."
+keywords = ["agent", "llm", "ai", "spec"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+
+[lints.rust]
+missing_docs = "warn"

@@ -1,0 +1,12 @@
+[package]
+name = "agent-sdk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent loop, hooks, permissions, and runtime for agent-sdk. (stub — Phase 3+.)"
+
+[dependencies]
+agent-sdk-language-model = { path = "../agent-sdk-language-model", version = "0.1.0" }
