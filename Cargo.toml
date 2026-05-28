@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/phuchoang-huynh/agent-sdk"
 homepage = "https://github.com/phuchoang-huynh/agent-sdk"
@@ -30,12 +30,12 @@ async-trait = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
-thiserror = "1"
+thiserror = "2"
 
 # Runtime / shared infra (used by core + providers, NOT by spec crate)
 tokio = { version = "1", default-features = false }
 tracing = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "stream", "json"] }
 bytes = "1"
 
 [profile.release]
