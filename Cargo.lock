@@ -97,6 +97,19 @@ name = "agent-sdk-openai"
 version = "0.1.0"
 dependencies = [
  "agent-sdk-language-model",
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "pin-project-lite",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]
